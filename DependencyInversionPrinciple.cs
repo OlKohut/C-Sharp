@@ -1,116 +1,129 @@
 using System;
+using System.Collections.Generic;
 
-namespace Variant4_PatientMedicalRecordService
+namespace Variant4_PatientMedicalRecordService.Task5
 {
-    public class MedicalRecord
+    public sealed class MedicalRecord
     {
-        public string RecordId { get; set; } = string.Empty;
-        public string PatientId { get; set; } = string.Empty;
-        public string Diagnosis { get; set; } = string.Empty;
-        public string DoctorNotes { get; set; } = string.Empty;
+        public string RecordId { get; set; }
+        public string PatientId { get; set; }
+        public string Diagnosis { get; set; }
+        public string DoctorNotes { get; set; }
     }
 
-    // 1. Виділення абстракцій
-    public interface IEncryptedStorage
+    // ===== Абстракції (належать високорівневому модулю) =====
+    public interface IMedicalRecordFileStorage { void SaveEncryptedRecord(string recordId, string data); }
+    public interface IMedicalRecordRepository  { void InsertRecord(MedicalRecord record); }
+    public interface IMedicalEventPublisher    { void PublishMedicalEvent(string eventType, string recordId); }
+
+    // ===== Production-реалізації =====
+    public sealed class EncryptedLocalFileStorage : IMedicalRecordFileStorage
     {
-        void SaveEncryptedRecord(string recordId, string data);
+        public void SaveEncryptedRecord(string recordId, string data) =>
+            Console.WriteLine($"[Encrypted File Storage] Картку {recordId} зашифровано AES-256 та збережено у локальне сховище.");
     }
 
-    public interface IHealthDatabase
+    public sealed class OracleHealthDatabase : IMedicalRecordRepository
     {
-        void InsertRecord(MedicalRecord record);
+        public void InsertRecord(MedicalRecord record) =>
+            Console.WriteLine($"[Oracle Health DB] Запис {record.RecordId} для пацієнта {record.PatientId} успішно збережено в таблицю 'PATIENT_RECORDS'.");
     }
 
-    public interface IEventPublisher
+    public sealed class HospitalEventBusPublisher : IMedicalEventPublisher
     {
-        void PublishMedicalEvent(string eventType, string recordId);
+        public void PublishMedicalEvent(string eventType, string recordId) =>
+            Console.WriteLine($"[Hospital EventBus] Опубліковано подію '{eventType}' для медичного запису {recordId}.");
     }
 
-    // 2. Реалізації
-    public class EncryptedLocalFileStorage : IEncryptedStorage
+    // ===== Mock-реалізації для тестів / демонстрації підміни =====
+    public sealed class InMemoryRecordRepository : IMedicalRecordRepository
     {
-        public void SaveEncryptedRecord(string recordId, string data)
-        {
-            Console.WriteLine($"[Encrypted File Storage] Картку {recordId} зашифровано AES-256 та збережено.");
-        }
+        public List<MedicalRecord> Records { get; } = new();
+        public void InsertRecord(MedicalRecord record) => Records.Add(record);
     }
 
-    public class OracleHealthDatabase : IHealthDatabase
+    public sealed class FakeFileStorage : IMedicalRecordFileStorage
     {
-        public void InsertRecord(MedicalRecord record)
-        {
-            Console.WriteLine($"[Oracle Health DB] Запис {record.RecordId} для пацієнта {record.PatientId} збережено.");
-        }
+        public Dictionary<string, string> Files { get; } = new();
+        public void SaveEncryptedRecord(string recordId, string data) => Files[recordId] = data;
     }
 
-    public class HospitalEventBusPublisher : IEventPublisher
+    public sealed class FakeEventPublisher : IMedicalEventPublisher
     {
-        public void PublishMedicalEvent(string eventType, string recordId)
-        {
-            Console.WriteLine($"[Hospital EventBus] Опубліковано подію '{eventType}' для {recordId}.");
-        }
+        public List<(string Type, string RecordId)> Events { get; } = new();
+        public void PublishMedicalEvent(string eventType, string recordId) => Events.Add((eventType, recordId));
     }
 
-    // Mock для тестування (демонстрація підміни реалізацій)
-    public class MockHealthDatabase : IHealthDatabase
+    // ===== Високорівнева логіка: жодного new для інфраструктури =====
+    public sealed class PatientMedicalRecordService
     {
-        public void InsertRecord(MedicalRecord record)
-        {
-            Console.WriteLine($"[Mock DB] Запис {record.RecordId} збережено у пам'ять для Unit-тесту.");
-        }
-    }
-
-    // 3. Високорівневий клас залежить ВІКЛЮЧНО від абстракцій (Constructor Injection)
-    public class PatientMedicalRecordService
-    {
-        private readonly IEncryptedStorage _fileStorage;
-        private readonly IHealthDatabase _database;
-        private readonly IEventPublisher _eventPublisher;
+        private readonly IMedicalRecordFileStorage _fileStorage;
+        private readonly IMedicalRecordRepository _repository;
+        private readonly IMedicalEventPublisher _eventPublisher;
 
         public PatientMedicalRecordService(
-            IEncryptedStorage fileStorage, 
-            IHealthDatabase database, 
-            IEventPublisher eventPublisher)
+            IMedicalRecordFileStorage fileStorage,
+            IMedicalRecordRepository repository,
+            IMedicalEventPublisher eventPublisher)
         {
             _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
-            _database = database ?? throw new ArgumentNullException(nameof(database));
+            _repository = repository ?? throw new ArgumentNullException(nameof(repository));
             _eventPublisher = eventPublisher ?? throw new ArgumentNullException(nameof(eventPublisher));
         }
 
         public void SavePatientRecord(MedicalRecord record)
         {
-            if (record == null || string.IsNullOrEmpty(record.PatientId))
-            {
+            if (record is null || string.IsNullOrEmpty(record.PatientId))
                 throw new ArgumentException("Некоректний медичний запис пацієнта.");
-            }
 
-            _database.InsertRecord(record);
+            _repository.InsertRecord(record);
             _fileStorage.SaveEncryptedRecord(record.RecordId, record.Diagnosis);
             _eventPublisher.PublishMedicalEvent("PATIENT_DIAGNOSIS_UPDATED", record.RecordId);
         }
     }
 
-    // 4. Composition Root (Точка збірки програми)
-    public static class Program
+    // ===== Composition Root: єдине місце, де створюються конкретні залежності =====
+    public static class CompositionRoot
     {
-        public static void Main()
+        public static PatientMedicalRecordService CreateProduction() =>
+            new PatientMedicalRecordService(
+                new EncryptedLocalFileStorage(),
+                new OracleHealthDatabase(),
+                new HospitalEventBusPublisher());
+
+        public static PatientMedicalRecordService CreateForTests(
+            InMemoryRecordRepository repository,
+            FakeFileStorage fileStorage,
+            FakeEventPublisher publisher) =>
+            new PatientMedicalRecordService(fileStorage, repository, publisher);
+    }
+
+    // ===== Демонстрація підміни реалізацій =====
+    public static class DipDemo
+    {
+        public static void Run()
         {
-            // Налаштування залежностей вручну (Manual DI)
-            IEncryptedStorage storage = new EncryptedLocalFileStorage();
-            IHealthDatabase database = new OracleHealthDatabase(); // або new MockHealthDatabase()
-            IEventPublisher publisher = new HospitalEventBusPublisher();
-
-            var service = new PatientMedicalRecordService(storage, database, publisher);
-
             var record = new MedicalRecord
             {
-                RecordId = "REC-1001",
-                PatientId = "PAT-555",
-                Diagnosis = "Грип A",
-                DoctorNotes = "Призначено спокій та рясне питво."
+                RecordId = "R-001",
+                PatientId = "P-100",
+                Diagnosis = "Гіпертонія",
+                DoctorNotes = "Контроль тиску"
             };
 
-            service.SavePatientRecord(record);
+            // 1) Production: Oracle + шифроване сховище + EventBus
+            Console.WriteLine("--- Production ---");
+            CompositionRoot.CreateProduction().SavePatientRecord(record);
+
+            // 2) Test: ті самі сервіс і логіка, але з in-memory заглушками
+            Console.WriteLine("--- Mock ---");
+            var repo = new InMemoryRecordRepository();
+            var files = new FakeFileStorage();
+            var events = new FakeEventPublisher();
+            CompositionRoot.CreateForTests(repo, files, events).SavePatientRecord(record);
+
+            Console.WriteLine($"Records: {repo.Records.Count}, Files: {files.Files.Count}, Events: {events.Events.Count}");
+            Console.WriteLine($"Event: {events.Events[0].Type} / {events.Events[0].RecordId}");
         }
     }
 }
