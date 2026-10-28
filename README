@@ -1,0 +1,97 @@
+Variant4_HotelBooking — SRP (Єдина відповідальність)
+Був один величезний клас («God Object»), який робив усе одразу: перевіряв дані гостя, 
+рахував ціни із сезонними знижками, малював HTML-код ваучера, записував логи у файл і 
+навіть надсилав HTTP-запити до Viber-шлюзу. Якщо змінювався формат ваучера чи спосіб 
+надсилання повідомлень — довелося б ламати весь клас.
+
+
+2) Variant4_TaxCalculator — OCP (Паттерн «Стратегія»)
+У нас був величезний метод із купою умов switch/case залежно від категорії товару. 
+Щоразу, коли з'являвся новий товар (наприклад, алкоголь чи акцизи), нам довелося б 
+лізти в цей старий клас і переписувати його. Це порушує принцип відкритості/закритості 
+(OCP) — код має бути відкритим для розширення, але закритим для модифікації.
+
+
+3)Variant4_ECommerceStorage — Виправляємо LSP та ISP
+У нас був один загальний клас InventoryItem (товар на складі), від якого успадковувався 
+цифровий товар (DigitalLicenseItem). Але цифрові ключі не мають фізичної кількості на 
+складі, їх не можна поповнити чи повернути постачальнику так само як коробки з товаром. 
+Через це у цифровому класі доводилося писати заглушки, які викидали помилки (NotSupportedException). 
+Це грубо порушувало принцип заміщення Лісков (LSP). Також був один «жирний» інтерфейс (порушення ISP).
+
+
+Завдання 4. ISP — Interface Segregation Principle
+### Було
+Один «жирний» інтерфейс `ICloudStorageProvider` на 6 методів:
+`UploadFile`, `DownloadFile`, `DeleteFile`, `GeneratePublicShareLink`, `CompressArchive`, `MountNetworkDrive`.
+
+Класи змушені були реалізовувати все, тому непотрібні методи кидали `NotImplementedException`:
+- `ReadOnlyPublicCDNProvider` — 4 заглушки (Upload, Delete, Compress, Mount)
+- `LocalFileSyncProvider` — 2 заглушки (GeneratePublicShareLink, Mount)
+
+Проблеми: клас залежить від методів, які не використовує; контракт «бреше»; помилки видно лише під час виконання.
+
+### Стало
+Інтерфейс розбито на 5 інтерфейсів за ролями:
+
+ Інтерфейс            Методи 
+
+ `IFileReader`        `DownloadFile` 
+ `IFileWriter`        `UploadFile`, `DeleteFile` 
+ `IShareLinkProvider`  `GeneratePublicShareLink` 
+ `IArchiver`          `CompressArchive` 
+ `INetworkDriveMounter `MountNetworkDrive` 
+
+Кожен клас реалізує лише те, що вміє:
+
+ Клас  Інтерфейси 
+
+ `ReadOnlyPublicCdnProvider`       `IFileReader`, `IShareLinkProvider` 
+ `LocalFileSyncProvider`           `IFileReader`, `IFileWriter`, `IArchiver` 
+ `NetworkShareProvider` (новий)    `IFileReader`, `IFileWriter`, `INetworkDriveMounter` 
+
+Клієнти залежать лише від потрібних ролей: `BackupService` (`IFileWriter` + `IArchiver`), `SharingService` (`IShareLinkProvider`), `DriveMountService` (`INetworkDriveMounter`), `DownloadService` (`IFileReader`).
+
+Результат: 0 заглушок і 0 `NotImplementedException`. Передати CDN у `BackupService` не вийде — помилка компіляції. `NetworkShareProvider` додано, щоб `INetworkDriveMounter` мав реалізацію (YAGNI).
+
+
+
+## Завдання 5. DIP — Dependency Inversion Principle
+
+### Було
+`PatientMedicalRecordService` сам створював залежності через `new` у конструкторі і зберігав конкретні класи:
+
+```csharp
+public PatientMedicalRecordService()
+{
+    _fileStorage = new EncryptedLocalFileStorage();
+    _oracleDatabase = new OracleHealthDatabase();
+    _eventBusPublisher = new HospitalEventBusPublisher();
+}
+```
+
+Проблеми: жорстка прив'язка до Oracle, файлів і шини; не можна підмінити реалізацію; не можна написати unit-тест; залежності приховані.
+
+### Стало
+1. Додано інтерфейси: `IMedicalRecordFileStorage`, `IMedicalRecordRepository`, `IMedicalEventPublisher`.
+2. Сервіс залежить тільки від інтерфейсів і отримує їх через конструктор (Constructor Injection) з перевіркою на `null`.
+3. Є дві групи реалізацій:
+
+ Інтерфейс                         Production                      Mock (для тестів) 
+ `IMedicalRecordFileStorage`    `EncryptedLocalFileStorage`       `FakeFileStorage` 
+ `IMedicalRecordRepository`     `OracleHealthDatabase`            `InMemoryRecordRepository` 
+ `IMedicalEventPublisher`       `HospitalEventBusPublisher`       `FakeEventPublisher` 
+
+4. `CompositionRoot` — єдине місце, де створюються конкретні класи (`CreateProduction()` і `CreateForTests()`). Service Locator не використовується.
+
+**Результат:** сервіс не знає про Oracle та інші конкретні класи; реалізацію можна замінити без зміни сервісу; логіку можна тестувати без реальної інфраструктури.
+
+---
+
+## Підсумок
+
+Було                                           Стало 
+ ISP  1 інтерфейс на 6 методів, 6 заглушок     5 інтерфейсів за ролями, 0 заглушок 
+ DIP  `new` усередині сервісу                  залежності через конструктор 
+ DIP  залежність від конкретних класів         залежність від інтерфейсів 
+ DIP  тестування неможливе                     підміна через Mock у `CompositionRoot` 
